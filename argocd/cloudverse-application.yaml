@@ -10,7 +10,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/Prashanthsb007/kubernetes-cloudverse-demo.git
+    repoURL: https://github.com/poojasdg05-prog/kubernetes-cloudverse-demo.git
     targetRevision: main
     path: cloudverse/k8s-manifests
 
