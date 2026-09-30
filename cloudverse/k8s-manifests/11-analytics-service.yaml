@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: analytics-service
-          image: YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cloudverse/analytics-service:v1
+          image: 914834315117.dkr.ecr.us-east-1.amazonaws.com/cloudverse/analytics-service:v1
           ports:
             - containerPort: 4007
           resources:

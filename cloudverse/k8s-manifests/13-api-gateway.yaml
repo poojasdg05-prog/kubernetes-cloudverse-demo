@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: api-gateway
-          image: YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/cloudverse/api-gateway:v1
+          image: 914834315117.dkr.ecr.us-east-1.amazonaws.com/cloudverse/api-gateway:v1
           ports:
             - containerPort: 4000
           env:
