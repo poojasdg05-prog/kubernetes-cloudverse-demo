@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: product-service
-          image: 914834315117.dkr.ecr.us-east-1.amazonaws.com/cloudverse/product-service:v2
+          image: 914834315117.dkr.ecr.us-east-1.amazonaws.com/cloudverse/product-service:v1
           ports:
             - containerPort: 4003
           envFrom:
