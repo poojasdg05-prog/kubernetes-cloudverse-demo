@@ -1,10 +1,10 @@
 pipeline {
+
     agent any
 
     environment {
         AWS_REGION = 'us-east-1'
-        CLUSTER_NAME = 'cloudverse-cluster'
-        ECR_REPO = 'cloudverse/product-service'
+        ECR_PREFIX = 'cloudverse'
     }
 
     stages {
@@ -15,62 +15,117 @@ pipeline {
             }
         }
 
-        stage('AWS Identity') {
-            steps {
-                sh 'aws sts get-caller-identity'
-            }
-        }
-
-        stage('Build Docker Image') {
+        stage('Verify AWS') {
             steps {
                 sh '''
-                docker build \
-                  -t product-service:${BUILD_NUMBER} \
-                  cloudverse/services/product-service
+                    echo "Checking AWS identity..."
+                    aws sts get-caller-identity
                 '''
             }
         }
 
-        stage('Login to ECR') {
+        stage('ECR Login') {
             steps {
                 sh '''
-                ACCOUNT_ID=$(aws sts get-caller-identity \
-                  --query Account --output text)
+                    AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                      --query Account \
+                      --output text)
 
-                aws ecr get-login-password \
-                  --region ${AWS_REGION} |
-                docker login \
-                  --username AWS \
-                  --password-stdin \
-                  ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    aws ecr get-login-password \
+                      --region ${AWS_REGION} | \
+                    docker login \
+                      --username AWS \
+                      --password-stdin \
+                      ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
                 '''
             }
         }
 
-        stage('Push Image') {
+        stage('Build All Images') {
             steps {
                 sh '''
-                ACCOUNT_ID=$(aws sts get-caller-identity \
-                  --query Account --output text)
+                    SERVICES="ui api-gateway auth-service user-service product-service order-service cart-service notification-service analytics-service search-service"
 
-                IMAGE=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${BUILD_NUMBER}
+                    for SERVICE in $SERVICES
+                    do
 
-                docker tag product-service:${BUILD_NUMBER} $IMAGE
-                docker push $IMAGE
+                      echo "========================================="
+                      echo "BUILDING $SERVICE"
+                      echo "========================================="
+
+                      docker build \
+                        -t $SERVICE:${BUILD_NUMBER} \
+                        cloudverse/services/$SERVICE
+
+                    done
                 '''
             }
         }
 
-        stage('Connect EKS') {
+        stage('Tag and Push All Images') {
             steps {
                 sh '''
-                aws eks update-kubeconfig \
-                  --region ${AWS_REGION} \
-                  --name ${CLUSTER_NAME}
+                    AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                      --query Account \
+                      --output text)
 
-                kubectl get nodes
+                    ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                    SERVICES="ui api-gateway auth-service user-service product-service order-service cart-service notification-service analytics-service search-service"
+
+                    for SERVICE in $SERVICES
+                    do
+
+                      echo "========================================="
+                      echo "PUSHING $SERVICE"
+                      echo "========================================="
+
+                      IMAGE=${ECR_REGISTRY}/${ECR_PREFIX}/${SERVICE}:${BUILD_NUMBER}
+
+                      docker tag \
+                        $SERVICE:${BUILD_NUMBER} \
+                        $IMAGE
+
+                      docker push $IMAGE
+
+                    done
+                '''
+            }
+        }
+
+        stage('Verify Images') {
+            steps {
+                sh '''
+                    SERVICES="ui api-gateway auth-service user-service product-service order-service cart-service notification-service analytics-service search-service"
+
+                    for SERVICE in $SERVICES
+                    do
+
+                      echo "-----------------------------------------"
+                      echo "ECR IMAGE: $SERVICE"
+                      echo "-----------------------------------------"
+
+                      aws ecr describe-images \
+                        --repository-name ${ECR_PREFIX}/$SERVICE \
+                        --region ${AWS_REGION} \
+                        --query 'imageDetails[].imageTags' \
+                        --output table
+
+                    done
                 '''
             }
         }
     }
-}
+
+    post {
+
+        success {
+            echo '========================================='
+            echo 'ALL CLOUDVERSE IMAGES BUILT SUCCESSFULLY'
+            echo '========================================='
+        }
+
+        failure {
+            echo '========================================='
+            echo 'CLOUDVERSE BUILD FAILED'
+            echo
