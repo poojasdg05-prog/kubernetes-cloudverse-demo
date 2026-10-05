@@ -11,14 +11,24 @@ pipeline {
 
         stage('Checkout') {
             steps {
+                echo 'Checking out CloudVerse repository...'
                 checkout scm
             }
         }
 
-        stage('Verify AWS') {
+        stage('Verify Environment') {
             steps {
                 sh '''
-                    echo "Checking AWS identity..."
+                    echo "===== AWS VERSION ====="
+                    aws --version
+
+                    echo "===== DOCKER VERSION ====="
+                    docker --version
+
+                    echo "===== KUBECTL VERSION ====="
+                    kubectl version --client
+
+                    echo "===== AWS IDENTITY ====="
                     aws sts get-caller-identity
                 '''
             }
@@ -27,47 +37,56 @@ pipeline {
         stage('ECR Login') {
             steps {
                 sh '''
+                    echo "Logging into Amazon ECR..."
+
                     AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
-                      --query Account \
-                      --output text)
+                        --query Account \
+                        --output text)
 
                     aws ecr get-login-password \
-                      --region ${AWS_REGION} | \
+                        --region ${AWS_REGION} | \
                     docker login \
-                      --username AWS \
-                      --password-stdin \
-                      ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                        --username AWS \
+                        --password-stdin \
+                        ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                    echo "ECR login successful"
                 '''
             }
         }
 
-        stage('Build All Images') {
+        stage('Build All Services') {
             steps {
                 sh '''
+                    set -e
+
                     SERVICES="ui api-gateway auth-service user-service product-service order-service cart-service notification-service analytics-service search-service"
 
                     for SERVICE in $SERVICES
                     do
+                        echo "=============================================="
+                        echo "BUILDING SERVICE: $SERVICE"
+                        echo "=============================================="
 
-                      echo "========================================="
-                      echo "BUILDING $SERVICE"
-                      echo "========================================="
+                        docker build \
+                            -t ${SERVICE}:${BUILD_NUMBER} \
+                            cloudverse/services/${SERVICE}
 
-                      docker build \
-                        -t $SERVICE:${BUILD_NUMBER} \
-                        cloudverse/services/$SERVICE
-
+                        echo "Successfully built ${SERVICE}:${BUILD_NUMBER}"
+                        echo ""
                     done
                 '''
             }
         }
 
-        stage('Tag and Push All Images') {
+        stage('Tag Images') {
             steps {
                 sh '''
+                    set -e
+
                     AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
-                      --query Account \
-                      --output text)
+                        --query Account \
+                        --output text)
 
                     ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
@@ -75,41 +94,66 @@ pipeline {
 
                     for SERVICE in $SERVICES
                     do
+                        echo "=============================================="
+                        echo "TAGGING SERVICE: $SERVICE"
+                        echo "=============================================="
 
-                      echo "========================================="
-                      echo "PUSHING $SERVICE"
-                      echo "========================================="
-
-                      IMAGE=${ECR_REGISTRY}/${ECR_PREFIX}/${SERVICE}:${BUILD_NUMBER}
-
-                      docker tag \
-                        $SERVICE:${BUILD_NUMBER} \
-                        $IMAGE
-
-                      docker push $IMAGE
+                        docker tag \
+                            ${SERVICE}:${BUILD_NUMBER} \
+                            ${ECR_REGISTRY}/${ECR_PREFIX}/${SERVICE}:${BUILD_NUMBER}
 
                     done
                 '''
             }
         }
 
-        stage('Verify Images') {
+        stage('Push Images to ECR') {
             steps {
                 sh '''
+                    set -e
+
+                    AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                        --query Account \
+                        --output text)
+
+                    ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
                     SERVICES="ui api-gateway auth-service user-service product-service order-service cart-service notification-service analytics-service search-service"
 
                     for SERVICE in $SERVICES
                     do
+                        echo "=============================================="
+                        echo "PUSHING SERVICE: $SERVICE"
+                        echo "=============================================="
 
-                      echo "-----------------------------------------"
-                      echo "ECR IMAGE: $SERVICE"
-                      echo "-----------------------------------------"
+                        docker push \
+                            ${ECR_REGISTRY}/${ECR_PREFIX}/${SERVICE}:${BUILD_NUMBER}
 
-                      aws ecr describe-images \
-                        --repository-name ${ECR_PREFIX}/$SERVICE \
-                        --region ${AWS_REGION} \
-                        --query 'imageDetails[].imageTags' \
-                        --output table
+                        echo "Successfully pushed ${SERVICE}:${BUILD_NUMBER}"
+                        echo ""
+                    done
+                '''
+            }
+        }
+
+        stage('Verify ECR Images') {
+            steps {
+                sh '''
+                    set -e
+
+                    SERVICES="ui api-gateway auth-service user-service product-service order-service cart-service notification-service analytics-service search-service"
+
+                    for SERVICE in $SERVICES
+                    do
+                        echo "=============================================="
+                        echo "VERIFYING: $SERVICE"
+                        echo "=============================================="
+
+                        aws ecr describe-images \
+                            --repository-name ${ECR_PREFIX}/${SERVICE} \
+                            --region ${AWS_REGION} \
+                            --query "imageDetails[?contains(imageTags, '${BUILD_NUMBER}')].imageTags" \
+                            --output table
 
                     done
                 '''
@@ -120,12 +164,37 @@ pipeline {
     post {
 
         success {
-            echo '========================================='
-            echo 'ALL CLOUDVERSE IMAGES BUILT SUCCESSFULLY'
-            echo '========================================='
+            echo '''
+            ==============================================
+            CLOUDVERSE CI PIPELINE SUCCESSFUL
+            ==============================================
+            All services were:
+            1. Checked out
+            2. Docker built
+            3. Tagged
+            4. Pushed to Amazon ECR
+            5. Verified
+            ==============================================
+            '''
         }
 
         failure {
-            echo '========================================='
-            echo 'CLOUDVERSE BUILD FAILED'
-            echo
+            echo '''
+            ==============================================
+            CLOUDVERSE CI PIPELINE FAILED
+            ==============================================
+            Check the Jenkins Console Output.
+            ==============================================
+            '''
+        }
+
+        always {
+            sh '''
+                echo "Cleaning unused Docker images..."
+                docker image prune -f || true
+            '''
+        }
+    }
+}
+```
+
