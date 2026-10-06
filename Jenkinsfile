@@ -3,277 +3,147 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION     = 'us-east-1'
+        AWS_REGION  = 'us-east-1'
+        CLUSTER_NAME = 'cloudverse-cluster'
+        NAMESPACE    = 'cloudverse'
+
         AWS_ACCOUNT_ID = '914834315117'
-        EKS_CLUSTER    = 'cloudverse-cluster'
-        NAMESPACE      = 'cloudverse'
 
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-        SERVICES = 'ui api-gateway auth-service user-service product-service order-service cart-service notification-service analytics-service search-service'
-    }
-
-    options {
-        timestamps()
-        disableConcurrentBuilds()
+        UI_REPO = 'cloudverse/ui-service'
+        UI_IMAGE = "${ECR_REGISTRY}/${UI_REPO}"
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                echo '========== CHECKOUT =========='
-
                 checkout scm
-
-                sh '''
-                    echo "Commit:"
-                    git rev-parse --short HEAD
-
-                    echo "Workspace:"
-                    pwd
-
-                    ls -la
-                '''
             }
         }
 
-        stage('Verify Tools') {
+        stage('AWS Identity') {
             steps {
-                echo '========== VERIFY TOOLS =========='
-
                 sh '''
-                    set -e
-
-                    git --version
-                    docker --version
-                    aws --version
-                    kubectl version --client
-                '''
-            }
-        }
-
-        stage('Verify AWS') {
-            steps {
-                echo '========== VERIFY AWS =========='
-
-                sh '''
-                    set -e
-
+                    echo "Checking AWS identity..."
                     aws sts get-caller-identity
                 '''
             }
         }
 
-        stage('Configure EKS') {
+        stage('Build Docker Image') {
             steps {
-                echo '========== CONFIGURE EKS =========='
-
                 sh '''
-                    set -e
+                    echo "Building UI Docker image..."
 
-                    aws eks update-kubeconfig \
-                      --region "$AWS_REGION" \
-                      --name "$EKS_CLUSTER"
-
-                    kubectl get nodes
+                    docker build \
+                        -t ui-service:${BUILD_NUMBER} \
+                        cloudverse/services/ui-service
                 '''
             }
         }
 
-        stage('Create Namespace') {
+        stage('Login to ECR') {
             steps {
-                echo '========== CREATE NAMESPACE =========='
-
                 sh '''
-                    set -e
-
-                    kubectl create namespace "$NAMESPACE" \
-                      --dry-run=client \
-                      -o yaml | kubectl apply -f -
-
-                    kubectl get namespace "$NAMESPACE"
-                '''
-            }
-        }
-
-        stage('ECR Login') {
-            steps {
-                echo '========== ECR LOGIN =========='
-
-                sh '''
-                    set -e
+                    echo "Logging into Amazon ECR..."
 
                     aws ecr get-login-password \
-                      --region "$AWS_REGION" |
+                        --region ${AWS_REGION} | \
                     docker login \
-                      --username AWS \
-                      --password-stdin "$ECR_REGISTRY"
+                        --username AWS \
+                        --password-stdin ${ECR_REGISTRY}
                 '''
             }
         }
 
-        stage('Prepare ECR') {
+        stage('Push Image to ECR') {
             steps {
-                echo '========== PREPARE ECR =========='
-
                 sh '''
-                    set -e
+                    echo "Tagging image..."
 
-                    for SERVICE in $SERVICES
-                    do
-                        REPOSITORY="cloudverse/$SERVICE"
+                    docker tag \
+                        ui-service:${BUILD_NUMBER} \
+                        ${UI_IMAGE}:${BUILD_NUMBER}
 
-                        echo "Checking $REPOSITORY"
+                    echo "Pushing image to ECR..."
 
-                        aws ecr describe-repositories \
-                          --repository-names "$REPOSITORY" \
-                          --region "$AWS_REGION" \
-                          >/dev/null 2>&1 ||
-                        aws ecr create-repository \
-                          --repository-name "$REPOSITORY" \
-                          --region "$AWS_REGION"
-                    done
+                    docker push \
+                        ${UI_IMAGE}:${BUILD_NUMBER}
                 '''
             }
         }
 
-        stage('Build Images') {
+        stage('Connect to EKS') {
             steps {
-                echo '========== BUILD IMAGES =========='
-
                 sh '''
-                    set -e
+                    echo "Updating kubeconfig..."
 
-                    for SERVICE in $SERVICES
-                    do
-                        echo "================================"
-                        echo "BUILDING $SERVICE"
-                        echo "================================"
+                    aws eks update-kubeconfig \
+                        --region ${AWS_REGION} \
+                        --name ${CLUSTER_NAME}
 
-                        docker build \
-                          -t "$SERVICE:$BUILD_NUMBER" \
-                          "cloudverse/services/$SERVICE"
-                    done
+                    echo "Checking Kubernetes access..."
+
+                    kubectl get nodes
+
+                    echo "Checking CloudVerse namespace..."
+
+                    kubectl get pods -n ${NAMESPACE}
                 '''
             }
         }
 
-        stage('Tag Images') {
+        stage('Deploy UI') {
             steps {
-                echo '========== TAG IMAGES =========='
-
                 sh '''
-                    set -e
+                    echo "Updating UI deployment..."
 
-                    for SERVICE in $SERVICES
-                    do
-                        docker tag \
-                          "$SERVICE:$BUILD_NUMBER" \
-                          "$ECR_REGISTRY/cloudverse/$SERVICE:$BUILD_NUMBER"
-                    done
-                '''
-            }
-        }
+                    kubectl set image deployment/ui-service \
+                        ui-service=${UI_IMAGE}:${BUILD_NUMBER} \
+                        -n ${NAMESPACE}
 
-        stage('Push Images') {
-            steps {
-                echo '========== PUSH IMAGES =========='
+                    echo "Deployment image updated successfully."
 
-                sh '''
-                    set -e
-
-                    for SERVICE in $SERVICES
-                    do
-                        echo "Pushing $SERVICE:$BUILD_NUMBER"
-
-                        docker push \
-                          "$ECR_REGISTRY/cloudverse/$SERVICE:$BUILD_NUMBER"
-                    done
-                '''
-            }
-        }
-
-        stage('Deploy Kubernetes Manifests') {
-            steps {
-                echo '========== DEPLOY MANIFESTS =========='
-
-                sh '''
-                    set -e
-
-                    kubectl apply \
-                      -f cloudverse/k8s-manifests/ \
-                      -n "$NAMESPACE"
-                '''
-            }
-        }
-
-        stage('Update Application Images') {
-            steps {
-                echo '========== UPDATE IMAGES =========='
-
-                sh '''
-                    set -e
-
-                    for SERVICE in $SERVICES
-                    do
-                        echo "Updating deployment: $SERVICE"
-
-                        kubectl set image \
-                          deployment/"$SERVICE" \
-                          "$SERVICE"="$ECR_REGISTRY/cloudverse/$SERVICE:$BUILD_NUMBER" \
-                          -n "$NAMESPACE"
-                    done
+                    kubectl get deployment ui-service \
+                        -n ${NAMESPACE} \
+                        -o jsonpath='{.spec.template.spec.containers[0].image}{"\\n"}'
                 '''
             }
         }
 
         stage('Wait for Rollout') {
             steps {
-                echo '========== WAIT FOR ROLLOUT =========='
-
                 sh '''
-                    set -e
+                    echo "Waiting for UI rollout..."
 
-                    for SERVICE in $SERVICES
-                    do
-                        echo "Waiting for $SERVICE"
-
-                        kubectl rollout status \
-                          deployment/"$SERVICE" \
-                          -n "$NAMESPACE" \
-                          --timeout=300s
-                    done
+                    kubectl rollout status \
+                        deployment/ui-service \
+                        -n ${NAMESPACE} \
+                        --timeout=180s
                 '''
             }
         }
 
         stage('Verify Deployment') {
             steps {
-                echo '========== VERIFY DEPLOYMENT =========='
-
                 sh '''
-                    echo ""
-                    echo "========== PODS =========="
-                    kubectl get pods -n "$NAMESPACE" -o wide
+                    echo "Checking deployment..."
 
-                    echo ""
-                    echo "========== DEPLOYMENTS =========="
-                    kubectl get deployments -n "$NAMESPACE"
+                    kubectl get deployment ui-service \
+                        -n ${NAMESPACE}
 
-                    echo ""
-                    echo "========== SERVICES =========="
-                    kubectl get svc -n "$NAMESPACE"
+                    echo "Checking UI pods..."
 
-                    echo ""
-                    echo "========== INGRESS =========="
-                    kubectl get ingress -n "$NAMESPACE"
+                    kubectl get pods \
+                        -n ${NAMESPACE} \
+                        -l app=ui-service \
+                        -o wide
 
-                    echo ""
-                    echo "========== CURRENT IMAGES =========="
-                    kubectl get deployments \
-                      -n "$NAMESPACE" \
-                      -o custom-columns=DEPLOYMENT:.metadata.name,IMAGE:.spec.template.spec.containers[*].image
+                    echo "Checking all CloudVerse pods..."
+
+                    kubectl get pods -n ${NAMESPACE}
                 '''
             }
         }
@@ -282,28 +152,31 @@ pipeline {
     post {
 
         success {
-            echo '======================================'
-            echo ' CLOUDVERSE CI/CD SUCCESSFUL'
-            echo '======================================'
-        }
-
-        failure {
-            echo '======================================'
-            echo ' CLOUDVERSE CI/CD FAILED'
-            echo '======================================'
-
-            sh '''
-                kubectl get pods -n "$NAMESPACE" || true
-                kubectl get events -n "$NAMESPACE" \
-                  --sort-by=.lastTimestamp | tail -30 || true
+            echo '''
+            ==========================================
+            CloudVerse UI Deployment Successful
+            ==========================================
             '''
         }
 
-        always {
-            echo 'Cleaning Docker build cache'
+        failure {
+            echo '''
+            ==========================================
+            CloudVerse UI Deployment Failed
+            ==========================================
+            '''
 
             sh '''
-                docker image prune -f || true
+                echo "Deployment status:"
+                kubectl get deployment ui-service -n ${NAMESPACE} || true
+
+                echo "Pod status:"
+                kubectl get pods -n ${NAMESPACE} || true
+
+                echo "Recent events:"
+                kubectl get events \
+                    -n ${NAMESPACE} \
+                    --sort-by=.lastTimestamp | tail -30 || true
             '''
         }
     }
