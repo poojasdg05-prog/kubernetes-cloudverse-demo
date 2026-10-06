@@ -39,7 +39,7 @@ pipeline {
 
                     docker build \
                         -t ui-service:${BUILD_NUMBER} \
-                        cloudverse/services/ui-service
+                        cloudverse/services/ui
                 '''
             }
         }
